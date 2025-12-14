@@ -26,17 +26,20 @@ console = Console(force_terminal=True, legacy_windows=False)
 
 from .config import (
     COOKIES_FILE,
+    TOKENS_FILE,
     OUTPUT_DIR,
     get_config_summary,
     validate_credentials
 )
 from .auth.cookies import CookieManager
+from .auth.tokens import TokenManager
 from .auth.login import AutoLogin, ensure_authenticated
 from .scraper.vehicle_history import (
     VehicleHistoryScraper,
     scrape_single_vin,
     scrape_multiple_vins
 )
+from .scraper.api_scraper import CarfaxAPIScraper, scrape_with_api
 from .export.csv_exporter import CSVExporter
 
 
@@ -76,7 +79,8 @@ def cli():
 @click.option("--file", "-f", "file_path", type=click.Path(exists=True), help="ملف يحتوي أرقام VIN")
 @click.option("--output", "-o", help="اسم ملف الإخراج")
 @click.option("--append", "-a", is_flag=True, help="إضافة إلى ملف موجود")
-def scrape(vin: Optional[str], file_path: Optional[str], output: Optional[str], append: bool):
+@click.option("--api", is_flag=True, help="استخدام API مباشرة (أسرع)")
+def scrape(vin: Optional[str], file_path: Optional[str], output: Optional[str], append: bool, api: bool):
     """
     سحب تقارير تاريخ المركبات
     
@@ -114,15 +118,48 @@ def scrape(vin: Optional[str], file_path: Optional[str], output: Optional[str], 
         sys.exit(1)
     
     console.print(f"[cyan]📋 تم العثور على {len(vins)} رقم VIN[/cyan]")
+    
+    if api:
+        console.print("[green]⚡ وضع API (أسرع)[/green]")
+    
     console.print()
     
     # تشغيل الـ Scraper
-    asyncio.run(_run_scraper(vins, output, append))
+    asyncio.run(_run_scraper(vins, output, append, api))
 
 
-async def _run_scraper(vins: list[str], output: Optional[str], append: bool):
+async def _run_scraper(vins: list[str], output: Optional[str], append: bool, use_api: bool = False):
     """تشغيل عملية السحب"""
     
+    reports = []
+    
+    # استخدام API إذا كان متاحاً
+    if use_api:
+        token_manager = TokenManager(TOKENS_FILE)
+        
+        if not token_manager.load():
+            console.print("[red]✗ لم يتم العثور على tokens صالحة[/red]")
+            console.print("[yellow]  قم بإضافة tokens.json في مجلد data/[/yellow]")
+            return
+        
+        scraper = CarfaxAPIScraper(token_manager)
+        
+        async for report in scraper.get_reports(vins):
+            if hasattr(report, 'to_dict'):
+                reports.append(report.to_dict())
+            else:
+                reports.append(report)
+        
+        # تصدير النتائج
+        if reports:
+            exporter = CSVExporter(OUTPUT_DIR)
+            output_file = exporter.export(reports, filename=output, append=append)
+            console.print(f"\n[green]✓ تم تصدير {len(reports)} تقرير إلى:[/green]")
+            console.print(f"  [blue]{output_file}[/blue]")
+        
+        return
+    
+    # الوضع العادي (Playwright)
     # إعداد مدير الـ Cookies
     cookie_manager = CookieManager(COOKIES_FILE)
     

@@ -110,7 +110,14 @@ class CSVExporter:
         output_path = self.output_dir / filename
         
         # تحويل التقارير إلى قائمة قواميس
-        data = [report.to_dict() for report in reports]
+        data = []
+        for report in reports:
+            if hasattr(report, 'to_dict'):
+                data.append(report.to_dict())
+            elif isinstance(report, dict):
+                data.append(report)
+            else:
+                data.append(vars(report))
         
         # إنشاء DataFrame
         df = pd.DataFrame(data, columns=self.DEFAULT_COLUMNS)

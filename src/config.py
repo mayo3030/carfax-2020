@@ -27,6 +27,9 @@ CARFAX_PASSWORD = os.getenv("CARFAX_PASSWORD", "")
 # ملف الـ Cookies
 COOKIES_FILE = Path(os.getenv("COOKIES_FILE", DATA_DIR / "cookies.txt"))
 
+# ملف الـ Tokens
+TOKENS_FILE = Path(os.getenv("TOKENS_FILE", DATA_DIR / "tokens.json"))
+
 # إعدادات المتصفح
 HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
