@@ -22,7 +22,12 @@ from ..config import (
     MIN_DELAY,
     MAX_DELAY,
     USER_AGENT,
-    validate_credentials
+    PROXY_ENABLED,
+    USE_CHROME_PROFILE,
+    CHROME_USER_DATA_DIR,
+    CHROME_PROFILE,
+    validate_credentials,
+    get_playwright_proxy
 )
 
 console = Console()
@@ -68,21 +73,48 @@ class AutoLogin:
             
         console.print("[blue]🔐 بدء تسجيل الدخول...[/blue]")
         
+        # عرض حالة المتصفح
+        if USE_CHROME_PROFILE:
+            console.print("[cyan]  🌐 استخدام Chrome Profile الحالي[/cyan]")
+        elif PROXY_ENABLED:
+            console.print("[cyan]  🌐 البروكسي مفعل (Bright Data)[/cyan]")
+        
         try:
             async with async_playwright() as p:
-                # إنشاء المتصفح
-                browser = await p.chromium.launch(headless=HEADLESS)
-                context = await browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1920, "height": 1080}
-                )
-                
-                # تحميل الـ cookies إذا موجودة
-                cookies = self.cookie_manager.get_cookies_for_playwright()
-                if cookies:
-                    await context.add_cookies(cookies)
-                
-                page = await context.new_page()
+                # استخدام Chrome Profile إذا كان مفعل
+                if USE_CHROME_PROFILE:
+                    import os
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=os.path.join(CHROME_USER_DATA_DIR, CHROME_PROFILE),
+                        channel="chrome",
+                        headless=False,
+                        viewport={"width": 1920, "height": 1080},
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                            "--no-sandbox"
+                        ]
+                    )
+                    browser = None
+                    page = context.pages[0] if context.pages else await context.new_page()
+                else:
+                    # الوضع العادي
+                    browser = await p.chromium.launch(
+                        headless=HEADLESS,
+                        proxy=get_playwright_proxy()
+                    )
+                    context = await browser.new_context(
+                        user_agent=USER_AGENT,
+                        viewport={"width": 1920, "height": 1080},
+                        ignore_https_errors=PROXY_ENABLED
+                    )
+                    
+                    # تحميل الـ cookies إذا موجودة
+                    cookies = self.cookie_manager.get_cookies_for_playwright()
+                    if cookies:
+                        await context.add_cookies(cookies)
+                    
+                    page = await context.new_page()
                 
                 # الخطوة 1: فتح صفحة تسجيل الدخول
                 console.print("[dim]  → فتح صفحة تسجيل الدخول...[/dim]")
@@ -97,11 +129,18 @@ class AutoLogin:
                 # تأخير عشوائي لمحاكاة السلوك البشري
                 await asyncio.sleep(random.uniform(1, 2))
                 
+                # دالة مساعدة لإغلاق المتصفح
+                async def close_browser():
+                    if USE_CHROME_PROFILE:
+                        await context.close()
+                    else:
+                        await browser.close()
+                
                 # ملء حقل البريد الإلكتروني
                 email_filled = await self._fill_email(page)
                 if not email_filled:
                     console.print("[red]✗ لم يتم العثور على حقل البريد الإلكتروني[/red]")
-                    await browser.close()
+                    await close_browser()
                     return False
                 
                 await asyncio.sleep(random.uniform(0.5, 1))
@@ -110,7 +149,7 @@ class AutoLogin:
                 password_filled = await self._fill_password(page)
                 if not password_filled:
                     console.print("[red]✗ لم يتم العثور على حقل كلمة المرور[/red]")
-                    await browser.close()
+                    await close_browser()
                     return False
                 
                 await asyncio.sleep(random.uniform(0.5, 1))
@@ -128,11 +167,11 @@ class AutoLogin:
                     
                     # حفظ الـ cookies الجديدة
                     await self._save_session_cookies(context)
-                    await browser.close()
+                    await close_browser()
                     return True
                 else:
                     console.print("[red]✗ فشل تسجيل الدخول[/red]")
-                    await browser.close()
+                    await close_browser()
                     return False
                     
         except Exception as e:

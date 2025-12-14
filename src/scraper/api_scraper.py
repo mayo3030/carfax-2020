@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from ..auth.tokens import TokenManager
-from ..config import MIN_DELAY, MAX_DELAY
+from ..config import MIN_DELAY, MAX_DELAY, PROXY_ENABLED, get_httpx_proxy
 
 console = Console()
 
@@ -66,8 +66,8 @@ class CarfaxAPIScraper:
     أسرع وأكثر موثوقية من scraping عبر المتصفح
     """
     
-    # API Base URL - Carfax Dealer API
-    BASE_URL = "https://www.carfaxonline.com"
+    # API Base URL - Carfax Dealer API (من JWT audience)
+    BASE_URL = "https://dealers.carfax.com"
     
     # Endpoints
     VHR_ENDPOINT = "/api/vhr"
@@ -84,10 +84,16 @@ class CarfaxAPIScraper:
         self._client: Optional[httpx.AsyncClient] = None
     
     async def _get_client(self) -> httpx.AsyncClient:
-        """الحصول على HTTP client"""
+        """الحصول على HTTP client مع دعم البروكسي"""
         if self._client is None or self._client.is_closed:
+            # إعداد البروكسي إذا كان مفعل
+            proxy_url = get_httpx_proxy()
+            
+            # تعطيل التحقق من SSL عند استخدام البروكسي (Bright Data يستخدم self-signed cert)
             self._client = httpx.AsyncClient(
                 timeout=30.0,
+                proxy=proxy_url,
+                verify=not PROXY_ENABLED,  # تعطيل SSL verification مع البروكسي
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept": "application/json",
@@ -95,6 +101,10 @@ class CarfaxAPIScraper:
                     "Referer": "https://www.carfaxonline.com/"
                 }
             )
+            
+            if PROXY_ENABLED:
+                console.print("[cyan]  🌐 API: البروكسي مفعل[/cyan]")
+        
         return self._client
     
     async def close(self):
@@ -146,11 +156,22 @@ class CarfaxAPIScraper:
             if response.status_code == 404:
                 return VehicleReport(vin=vin, error="VIN غير موجود")
             
+            # طباعة معلومات الاستجابة للتصحيح
+            console.print(f"[dim]  Status: {response.status_code}[/dim]")
+            
             if response.status_code != 200:
+                console.print(f"[dim]  Response: {response.text[:200]}...[/dim]")
                 return VehicleReport(
                     vin=vin, 
                     error=f"خطأ API: {response.status_code}"
                 )
+            
+            # التحقق من أن الاستجابة JSON
+            content_type = response.headers.get("content-type", "")
+            if "application/json" not in content_type:
+                console.print(f"[yellow]  ⚠ Content-Type: {content_type}[/yellow]")
+                console.print(f"[dim]  Response: {response.text[:300]}...[/dim]")
+                return VehicleReport(vin=vin, error="الاستجابة ليست JSON")
             
             data = response.json()
             

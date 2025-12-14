@@ -28,6 +28,7 @@ from .config import (
     COOKIES_FILE,
     TOKENS_FILE,
     OUTPUT_DIR,
+    USE_CHROME_PROFILE,
     get_config_summary,
     validate_credentials
 )
@@ -40,6 +41,7 @@ from .scraper.vehicle_history import (
     scrape_multiple_vins
 )
 from .scraper.api_scraper import CarfaxAPIScraper, scrape_with_api
+from .scraper.full_report_scraper import scrape_full_report
 from .export.csv_exporter import CSVExporter
 
 
@@ -163,10 +165,14 @@ async def _run_scraper(vins: list[str], output: Optional[str], append: bool, use
     # إعداد مدير الـ Cookies
     cookie_manager = CookieManager(COOKIES_FILE)
     
-    # التأكد من المصادقة
-    if not await ensure_authenticated(cookie_manager):
-        console.print("[red]✗ فشل تسجيل الدخول[/red]")
-        return
+    # تخطي التحقق من المصادقة عند استخدام Chrome Profile
+    if USE_CHROME_PROFILE:
+        console.print("[cyan]🌐 استخدام Chrome Profile - تخطي التحقق من الجلسة[/cyan]")
+    else:
+        # التأكد من المصادقة
+        if not await ensure_authenticated(cookie_manager):
+            console.print("[red]✗ فشل تسجيل الدخول[/red]")
+            return
     
     console.print()
     
@@ -264,6 +270,60 @@ def status():
             console.print("  [yellow]⚠ الجلسة منتهية[/yellow]")
     else:
         console.print("  [red]✗ لا توجد جلسة محفوظة[/red]")
+
+
+@cli.command()
+@click.option("--vin", "-v", required=True, help="رقم VIN للمركبة")
+@click.option("--wholesale", "-w", is_flag=True, default=True, help="استخراج سعر Wholesale (مفعّل افتراضياً)")
+@click.option("--no-wholesale", is_flag=True, help="تخطي استخراج أسعار Wholesale")
+@click.option("--fast", "-f", is_flag=True, help="الوضع السريع (بدون حفظ ملفات debug)")
+def fullreport(vin: str, wholesale: bool, no_wholesale: bool, fast: bool):
+    """
+    سحب التقرير الكامل مع كل البيانات (JSON + CSV)
+    
+    \b
+    مثال:
+      python -m src.main fullreport --vin "WBAVC93528K043325"
+      python -m src.main fullreport --vin "WBAVC93528K043325" --fast
+    """
+    print_banner()
+    
+    # تحديد ما إذا كان سيتم استخراج Wholesale
+    get_wholesale = wholesale and not no_wholesale
+    
+    console.print("[blue]📋 سحب التقرير الكامل...[/blue]")
+    if fast:
+        console.print("[yellow]⚡ الوضع السريع[/yellow]")
+    console.print()
+    
+    asyncio.run(_run_full_report(vin, get_wholesale, fast))
+
+
+async def _run_full_report(vin: str, get_wholesale: bool = True, fast_mode: bool = False):
+    """تنفيذ سحب التقرير الكامل"""
+    report = await scrape_full_report(vin, str(OUTPUT_DIR), get_wholesale, fast_mode)
+    
+    if report.error:
+        console.print(f"[red]✗ خطأ: {report.error}[/red]")
+    else:
+        console.print()
+        console.print(Panel("[bold green]تم سحب التقرير بنجاح![/bold green]"))
+        console.print(f"  المركبة: {report.year} {report.make} {report.model} {report.trim}")
+        console.print(f"  الملاك: {report.total_owners}")
+        console.print(f"  الحوادث: {report.accidents_reported}")
+        console.print(f"  سجلات الخدمة: {report.service_records_count}")
+        console.print(f"  آخر قراءة: {report.last_odometer} miles")
+        
+        # عرض الأسعار
+        console.print()
+        console.print(Panel("[bold cyan]الأسعار[/bold cyan]"))
+        console.print(f"  💰 Retail Value: {report.retail_value or 'N/A'}")
+        if report.wholesale_value:
+            console.print(f"  💵 Wholesale Value: {report.wholesale_value}")
+        if report.trade_in_value:
+            console.print(f"  🔄 Trade-In Value: {report.trade_in_value}")
+        if report.private_party_value:
+            console.print(f"  👤 Private Party Value: {report.private_party_value}")
 
 
 @cli.command()

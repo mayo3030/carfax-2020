@@ -106,7 +106,7 @@ class TokenManager:
             return False
         
         try:
-            with open(self.tokens_file, "r", encoding="utf-8") as f:
+            with open(self.tokens_file, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             
             self._token_data = TokenData.from_dict(data)

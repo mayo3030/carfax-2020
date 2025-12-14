@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 
+
 from playwright.async_api import async_playwright, Page, Browser
 from bs4 import BeautifulSoup
 from rich.console import Console
@@ -27,7 +28,12 @@ from ..config import (
     MIN_DELAY,
     MAX_DELAY,
     USER_AGENT,
+    PROXY_ENABLED,
+    USE_CHROME_PROFILE,
+    CHROME_USER_DATA_DIR,
+    CHROME_PROFILE,
     validate_credentials,
+    get_playwright_proxy,
 )
 
 console = Console()
@@ -93,10 +99,13 @@ class VehicleHistoryScraper:
         self._context = None
     
     async def _init_browser(self):
-        """تهيئة المتصفح"""
+        """تهيئة المتصفح مع دعم البروكسي"""
         if self._browser is None:
             p = await async_playwright().start()
-            self._browser = await p.chromium.launch(headless=HEADLESS)
+            self._browser = await p.chromium.launch(
+                headless=HEADLESS,
+                proxy=get_playwright_proxy()
+            )
             self._context = await self._browser.new_context(
                 user_agent=USER_AGENT,
                 viewport={"width": 1920, "height": 1080}
@@ -106,6 +115,9 @@ class VehicleHistoryScraper:
             cookies = self.cookie_manager.get_cookies_for_playwright()
             if cookies:
                 await self._context.add_cookies(cookies)
+            
+            if PROXY_ENABLED:
+                console.print("[cyan]  🌐 المتصفح: البروكسي مفعل[/cyan]")
     
     async def _close_browser(self):
         """إغلاق المتصفح"""
@@ -130,20 +142,49 @@ class VehicleHistoryScraper:
         
         console.print(f"[blue]🔍 جاري البحث عن: {vin}[/blue]")
         
+        # عرض حالة المتصفح
+        if USE_CHROME_PROFILE:
+            console.print("[cyan]  🌐 استخدام Chrome Profile الحالي[/cyan]")
+        elif PROXY_ENABLED:
+            console.print("[cyan]  🌐 البروكسي مفعل (Bright Data)[/cyan]")
+        
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=HEADLESS)
-                context = await browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1920, "height": 1080}
-                )
-                
-                # تحميل الـ cookies
-                cookies = self.cookie_manager.get_cookies_for_playwright()
-                if cookies:
-                    await context.add_cookies(cookies)
-                
-                page = await context.new_page()
+                # استخدام Chrome Profile إذا كان مفعل
+                if USE_CHROME_PROFILE:
+                    import os
+                    # استخدام Chrome المثبت مع الـ profile الحالي
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=os.path.join(CHROME_USER_DATA_DIR, CHROME_PROFILE),
+                        channel="chrome",  # استخدام Chrome المثبت
+                        headless=False,  # Chrome profile لا يعمل في headless
+                        viewport={"width": 1920, "height": 1080},
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                            "--no-sandbox"
+                        ]
+                    )
+                    browser = None  # لا يوجد browser منفصل
+                    page = context.pages[0] if context.pages else await context.new_page()
+                else:
+                    # الوضع العادي
+                    browser = await p.chromium.launch(
+                        headless=HEADLESS,
+                        proxy=get_playwright_proxy()
+                    )
+                    context = await browser.new_context(
+                        user_agent=USER_AGENT,
+                        viewport={"width": 1920, "height": 1080},
+                        ignore_https_errors=PROXY_ENABLED
+                    )
+                    
+                    # تحميل الـ cookies
+                    cookies = self.cookie_manager.get_cookies_for_playwright()
+                    if cookies:
+                        await context.add_cookies(cookies)
+                    
+                    page = await context.new_page()
                 
                 # الذهاب للصفحة الرئيسية أولاً
                 await page.goto(CARFAX_BASE_URL, wait_until="networkidle")
@@ -162,57 +203,109 @@ class VehicleHistoryScraper:
                 # البحث عن حقل VIN وإدخاله
                 vin_found = False
                 try:
-                    # البحث عن حقل الإدخال - جرب عدة selectors
-                    vin_selectors = [
-                        'input[name="vin"]',
-                        'input[placeholder*="VIN"]',
-                        'input[id*="vin"]',
-                        '#vinInput',
-                        'input[aria-label*="VIN"]',
-                        'input[class*="vin"]',
-                        'input[type="text"]'
-                    ]
+                    # انتظار تحميل الصفحة بالكامل
+                    await asyncio.sleep(3)
                     
-                    for selector in vin_selectors:
-                        vin_input = await page.query_selector(selector)
-                        if vin_input:
-                            await vin_input.click()
-                            await asyncio.sleep(0.3)
-                            await vin_input.fill(vin)
-                            await asyncio.sleep(0.5)
-                            console.print(f"[dim]  تم إدخال VIN في: {selector}[/dim]")
-                            vin_found = True
-                            break
+                    # انتظار ظهور حقل VIN
+                    try:
+                        await page.wait_for_selector('#vin', timeout=10000)
+                    except:
+                        console.print("[yellow]  ⚠ انتظار ظهور حقل VIN...[/yellow]")
                     
-                    if vin_found:
-                        # البحث عن زر البحث والنقر عليه
-                        button_selectors = [
-                            'button[type="submit"]',
-                            'button:has-text("Run")',
-                            'button:has-text("Search")',
-                            'button:has-text("Go")',
-                            '.search-btn',
-                            'input[type="submit"]'
-                        ]
+                    # استخدام Playwright's fill مع force
+                    await page.click('#vin')
+                    await asyncio.sleep(0.5)
+                    
+                    # مسح أي محتوى موجود
+                    await page.fill('#vin', '')
+                    await asyncio.sleep(0.3)
+                    
+                    # إدخال VIN
+                    await page.fill('#vin', vin)
+                    await asyncio.sleep(1)
+                    
+                    # التحقق من إدخال VIN
+                    entered_value = await page.input_value('#vin')
+                    console.print(f"[dim]  القيمة المدخلة: {entered_value}[/dim]")
+                    
+                    if entered_value == vin:
+                        console.print(f"[green]  ✓ تم إدخال VIN بنجاح[/green]")
+                        vin_found = True
+                    else:
+                        # محاولة ثانية باستخدام type
+                        console.print("[yellow]  ⚠ محاولة إدخال VIN بطريقة أخرى...[/yellow]")
+                        await page.click('#vin', click_count=3)  # تحديد الكل
+                        await page.keyboard.type(vin, delay=100)
+                        await asyncio.sleep(1)
+                        entered_value = await page.input_value('#vin')
+                        console.print(f"[dim]  القيمة بعد المحاولة الثانية: {entered_value}[/dim]")
+                        vin_found = len(entered_value) > 0
+                    
+                    # انتظار تفعيل زر البحث
+                    await asyncio.sleep(2)
+                    
+                    # التحقق من زر البحث
+                    search_button = await page.query_selector('#run_vhr_button')
+                    
+                    if search_button:
+                        is_disabled = await search_button.get_attribute('disabled')
+                        console.print(f"[dim]  حالة الزر: {'معطل' if is_disabled else 'مفعل'}[/dim]")
                         
-                        for selector in button_selectors:
-                            try:
-                                search_button = await page.query_selector(selector)
-                                if search_button:
-                                    await search_button.click()
-                                    console.print(f"[dim]  تم النقر على: {selector}[/dim]")
-                                    await asyncio.sleep(5)
-                                    break
-                            except:
-                                continue
+                        if is_disabled:
+                            console.print("[yellow]  ⚠ الزر معطل - محاولة تفعيل...[/yellow]")
+                            await asyncio.sleep(2)
                         
-                        # أو اضغط Enter
-                        if not search_button:
-                            await page.keyboard.press("Enter")
-                            await asyncio.sleep(5)
+                        # النقر على الزر
+                        console.print("[dim]  النقر على زر البحث...[/dim]")
+                        url_before = page.url
+                        
+                        # النقر على الزر
+                        await search_button.click()
+                        console.print("[dim]  تم النقر - انتظار تحميل المحتوى...[/dim]")
+                        
+                        # انتظار تحميل المحتوى الجديد
+                        await asyncio.sleep(3)
+                        
+                        url_after = page.url
+                        
+                        # إذا لم يتغير الـ URL، حاول الذهاب مباشرة لصفحة التقرير
+                        if url_after == url_before:
+                            console.print("[yellow]  ⚠ الـ URL لم يتغير - محاولة الانتقال مباشرة للتقرير...[/yellow]")
+                            # جرب URLs مختلفة للتقرير
+                            report_urls = [
+                                f"{CARFAX_BASE_URL}/vhr/{vin}",
+                                f"{CARFAX_BASE_URL}/cfm/vehicle-history-report.cfm?vin={vin}",
+                                f"https://www.carfaxonline.com/vhr?vin={vin}",
+                            ]
                             
+                            for report_url in report_urls:
+                                try:
+                                    console.print(f"[dim]  محاولة: {report_url}[/dim]")
+                                    await page.goto(report_url, wait_until="networkidle", timeout=15000)
+                                    await asyncio.sleep(3)
+                                    
+                                    # تحقق إذا وصلنا لصفحة التقرير
+                                    page_text = await page.inner_text('body')
+                                    if vin in page_text or "Previous owner" in page_text or "accident" in page_text.lower():
+                                        console.print("[green]  ✓ تم العثور على صفحة التقرير![/green]")
+                                        break
+                                except Exception as nav_err:
+                                    console.print(f"[dim]  فشل: {nav_err}[/dim]")
+                                    continue
+                        
+                        # البحث عن عناصر التقرير أو رسائل الخطأ
+                        page_text = await page.inner_text('body')
+                        has_report = vin in page_text or "Previous owner" in page_text or "accident" in page_text.lower()
+                    
+                    # انتظار تحميل النتائج
+                    console.print("[dim]  انتظار تحميل التقرير...[/dim]")
+                    await asyncio.sleep(3)
+                    
+                    current_url = page.url
+                    console.print(f"[dim]  URL الحالي: {current_url}[/dim]")
+                    
                 except Exception as e:
-                    console.print(f"[yellow]  ⚠ لم يتم العثور على حقل VIN: {e}[/yellow]")
+                    console.print(f"[yellow]  ⚠ خطأ في إدخال VIN: {e}[/yellow]")
                 
                 # الحصول على HTML
                 html = await page.content()
@@ -227,7 +320,11 @@ class VehicleHistoryScraper:
                     f.write(html)
                 console.print(f"[dim]  تم حفظ HTML في: {debug_file}[/dim]")
                 
-                await browser.close()
+                # إغلاق المتصفح
+                if USE_CHROME_PROFILE:
+                    await context.close()
+                else:
+                    await browser.close()
                 
                 # تأخير عشوائي
                 await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
@@ -423,7 +520,8 @@ class VehicleHistoryScraper:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
-            # استخراج السنة/الشركة/الموديل
+            # استخراج السنة/الشركة/الموديل من عنوان التقرير
+            # مثال: "2008 BMW 3 SERIES 328XI"
             ymm = self._extract_year_make_model(html, soup)
             if ymm:
                 report.year = ymm.get("year")
@@ -440,14 +538,30 @@ class VehicleHistoryScraper:
             # استخراج سجلات الخدمة
             report.service_records = self._extract_service_records(html, soup)
             
-            # استخراج المسافة
+            # استخراج المسافة (Last reported odometer reading)
             report.mileage = self._extract_mileage(html, soup)
             
             # استخراج حالة العنوان
             report.title_status = self._extract_title_status(html, soup)
             
+            # استخراج بيانات إضافية من التقرير
+            report.raw_data = self._extract_additional_data(html, soup)
+            
             if report.year or report.make or report.model:
-                console.print(f"[green]  ✓ {report.year or '?'} {report.make or '?'} {report.model or '?'}[/green]")
+                vehicle_info = f"{report.year or '?'} {report.make or '?'} {report.model or '?'}"
+                if report.trim:
+                    vehicle_info += f" {report.trim}"
+                console.print(f"[green]  ✓ {vehicle_info}[/green]")
+                
+                # عرض ملخص البيانات
+                if report.owners:
+                    console.print(f"[dim]    الملاك: {report.owners}[/dim]")
+                if report.accidents is not None:
+                    console.print(f"[dim]    الحوادث: {report.accidents}[/dim]")
+                if report.mileage:
+                    console.print(f"[dim]    المسافة: {report.mileage} miles[/dim]")
+                if report.service_records:
+                    console.print(f"[dim]    سجلات الخدمة: {report.service_records}[/dim]")
             else:
                 console.print(f"[yellow]  ⚠ لم يتم العثور على بيانات المركبة[/yellow]")
             
@@ -457,57 +571,106 @@ class VehicleHistoryScraper:
             
         return report
     
+    def _extract_additional_data(self, html: str, soup: BeautifulSoup) -> dict:
+        """استخراج بيانات إضافية من التقرير"""
+        data = {}
+        
+        # استخراج CARFAX Retail Value
+        value_match = re.search(r'\$[\d,]+(?:\.\d{2})?\s*(?:CARFAX\s*Retail\s*Value)?', html)
+        if value_match:
+            data['retail_value'] = value_match.group(0).strip()
+        
+        # استخراج نوع المركبة (SEDAN, SUV, etc.)
+        vehicle_types = ['SEDAN', 'SUV', 'COUPE', 'TRUCK', 'VAN', 'WAGON', 'CONVERTIBLE', 'HATCHBACK']
+        for vtype in vehicle_types:
+            if vtype in html.upper():
+                data['vehicle_type'] = vtype
+                break
+        
+        # استخراج نوع الوقود
+        fuel_types = ['GASOLINE', 'DIESEL', 'ELECTRIC', 'HYBRID', 'FLEX FUEL']
+        for ftype in fuel_types:
+            if ftype in html.upper():
+                data['fuel_type'] = ftype
+                break
+        
+        # استخراج نظام الدفع
+        drive_types = ['ALL WHEEL DRIVE', 'FRONT WHEEL DRIVE', 'REAR WHEEL DRIVE', '4WD', 'AWD', 'FWD', 'RWD']
+        for dtype in drive_types:
+            if dtype in html.upper():
+                data['drive_type'] = dtype
+                break
+        
+        # استخراج الولاية الأخيرة
+        state_match = re.search(r'Last owned in\s+([A-Za-z\s]+)', html)
+        if state_match:
+            data['last_state'] = state_match.group(1).strip()
+        
+        return data
+    
     def _extract_year_make_model(self, html: str, soup: BeautifulSoup) -> Optional[dict]:
         """استخراج السنة/الشركة/الموديل"""
+        
+        # قائمة الشركات المعروفة للتحقق
+        known_makes = [
+            'Honda', 'Toyota', 'Ford', 'Chevrolet', 'Chevy', 'BMW', 'Mercedes', 
+            'Audi', 'Volkswagen', 'VW', 'Nissan', 'Hyundai', 'Kia', 'Mazda',
+            'Subaru', 'Lexus', 'Acura', 'Infiniti', 'Jeep', 'Dodge', 'Ram',
+            'Chrysler', 'GMC', 'Cadillac', 'Buick', 'Lincoln', 'Volvo', 'Porsche',
+            'Tesla', 'Mitsubishi', 'Suzuki', 'Fiat', 'Alfa', 'Jaguar', 'Land',
+            'Range', 'Mini', 'Smart', 'Scion', 'Saturn', 'Pontiac', 'Oldsmobile',
+            'Mercury', 'Hummer', 'Saab', 'Isuzu', 'Daewoo', 'Genesis', 'Polestar'
+        ]
+        known_makes_lower = [m.lower() for m in known_makes]
+        
         # البحث في العناصر المحددة
-        title_elements = soup.select('.vehicle-title, .vehicle-header, [class*="year-make-model"]')
+        title_elements = soup.select('.vehicle-title, .vehicle-header, [class*="year-make-model"], .vhr-title, .report-title')
         
         for elem in title_elements:
             text = elem.get_text(strip=True)
             match = re.match(r'(\d{4})\s+([A-Za-z]+)\s+(.+)', text)
             if match:
-                return {
-                    "year": match.group(1),
-                    "make": match.group(2),
-                    "model": match.group(3).split()[0] if match.group(3) else None,
-                    "trim": " ".join(match.group(3).split()[1:]) if len(match.group(3).split()) > 1 else None
-                }
+                make = match.group(2)
+                # تحقق أن الشركة معروفة
+                if make.lower() in known_makes_lower:
+                    return {
+                        "year": match.group(1),
+                        "make": make,
+                        "model": match.group(3).split()[0] if match.group(3) else None,
+                        "trim": " ".join(match.group(3).split()[1:]) if len(match.group(3).split()) > 1 else None
+                    }
         
-        # البحث بالنمط في HTML
-        patterns = [
-            r'(\d{4})\s+([A-Za-z]+)\s+([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)?)\s*([A-Za-z0-9]*)',
-            r'year["\s:>]+(\d{4})',
-        ]
-        
-        for pattern in patterns:
+        # البحث بنمط أكثر تحديداً - السنة + شركة معروفة
+        for make in known_makes:
+            pattern = rf'(\d{{4}})\s+{make}\s+([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)?)'
             match = re.search(pattern, html, re.IGNORECASE)
             if match:
-                groups = match.groups()
-                if len(groups) >= 3:
-                    return {
-                        "year": groups[0],
-                        "make": groups[1],
-                        "model": groups[2],
-                        "trim": groups[3] if len(groups) > 3 else None
-                    }
-                elif len(groups) == 1:
-                    return {"year": groups[0]}
+                return {
+                    "year": match.group(1),
+                    "make": make,
+                    "model": match.group(2).split()[0] if match.group(2) else None,
+                    "trim": " ".join(match.group(2).split()[1:]) if len(match.group(2).split()) > 1 else None
+                }
+        
+        # البحث عن سنة فقط في عناصر التقرير
+        year_elements = soup.select('[class*="year"], [class*="vehicle"]')
+        for elem in year_elements:
+            text = elem.get_text(strip=True)
+            match = re.search(r'\b(19[89]\d|20[0-2]\d)\b', text)
+            if match:
+                year = match.group(1)
+                # تحقق أنها سنة منطقية للمركبة (1980-2025)
+                if 1980 <= int(year) <= 2026:
+                    return {"year": year}
                     
         return None
     
     def _extract_owners(self, html: str, soup: BeautifulSoup) -> Optional[int]:
         """استخراج عدد الملاك"""
-        # البحث في العناصر
-        owner_elements = soup.select('[class*="owner"], .ownership-history')
-        for elem in owner_elements:
-            text = elem.get_text()
-            match = re.search(r'(\d+)\s*owner', text, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-        
-        # البحث بالنمط
+        # أنماط محددة من تقرير CARFAX
         patterns = [
-            r'(\d+)\s*owner',
+            r'(\d+)\s*Previous\s*owners?',  # "2 Previous owners"
+            r'(\d+)\s*owner',  # "2 owner"
             r'owner[s]?["\s:>]+(\d+)',
         ]
         
@@ -518,6 +681,14 @@ class VehicleHistoryScraper:
                     return int(match.group(1))
                 except ValueError:
                     pass
+        
+        # البحث في العناصر
+        owner_elements = soup.select('[class*="owner"], .ownership-history')
+        for elem in owner_elements:
+            text = elem.get_text()
+            match = re.search(r'(\d+)\s*(?:Previous\s*)?owner', text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
                     
         return None
     
@@ -555,8 +726,9 @@ class VehicleHistoryScraper:
     def _extract_service_records(self, html: str, soup: BeautifulSoup) -> Optional[int]:
         """استخراج عدد سجلات الخدمة"""
         patterns = [
-            r'(\d+)\s*service\s*record',
-            r'service.*?(\d+)\s*record',
+            r'(\d+)\s*Service\s*history\s*records?',  # "38 Service history records"
+            r'(\d+)\s*service\s*records?',
+            r'service.*?(\d+)\s*records?',
         ]
         
         for pattern in patterns:
@@ -571,24 +743,38 @@ class VehicleHistoryScraper:
     
     def _extract_mileage(self, html: str, soup: BeautifulSoup) -> Optional[str]:
         """استخراج قراءة عداد المسافات"""
-        # البحث في العناصر
-        mileage_elements = soup.select('[class*="mileage"], [class*="odometer"]')
-        for elem in mileage_elements:
-            text = elem.get_text()
-            match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*(?:miles|mi)', text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
+        # أنماط محددة من تقرير CARFAX
         patterns = [
-            r'(\d{1,3}(?:,\d{3})*)\s*(?:miles|mi)',
-            r'odometer.*?(\d{1,3}(?:,\d{3})*)',
-            r'mileage.*?(\d{1,3}(?:,\d{3})*)',
+            r'([\d,]+)\s*Last\s*reported\s*odometer\s*reading',  # "108,487 Last reported odometer reading"
+            r'Last\s*reported\s*odometer\s*reading[:\s]*([\d,]+)',
+            r'odometer[:\s]*([\d,]+)',
+            r'([\d,]+)\s*(?:miles|mi)\b',
+            r'mileage[:\s]*([\d,]+)',
         ]
         
         for pattern in patterns:
             match = re.search(pattern, html, re.IGNORECASE)
             if match:
-                return match.group(1)
+                mileage = match.group(1).replace(',', '')
+                # تحقق أن الرقم منطقي (أكثر من 100 وأقل من مليون)
+                try:
+                    if 100 < int(mileage) < 1000000:
+                        return match.group(1)  # إرجاع مع الفواصل
+                except:
+                    pass
+        
+        # البحث في العناصر
+        mileage_elements = soup.select('[class*="mileage"], [class*="odometer"]')
+        for elem in mileage_elements:
+            text = elem.get_text()
+            match = re.search(r'([\d,]+)', text)
+            if match:
+                mileage = match.group(1).replace(',', '')
+                try:
+                    if 100 < int(mileage) < 1000000:
+                        return match.group(1)
+                except:
+                    pass
                     
         return None
     
