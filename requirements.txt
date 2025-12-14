@@ -1,0 +1,27 @@
+# Carfax Scraper Requirements
+# ==========================
+
+# Web Scraping (using Playwright directly instead of crawl4ai due to Python 3.14 compatibility)
+playwright>=1.40.0
+
+# HTTP & Async
+httpx>=0.25.0
+aiofiles>=23.0.0
+
+# Environment & Config
+python-dotenv>=1.0.0
+
+# CLI
+click>=8.1.0
+rich>=13.0.0
+
+# Data Export
+pandas>=2.0.0
+
+# Utilities
+python-dateutil>=2.8.0
+
+# HTML Parsing (alternative to lxml)
+beautifulsoup4>=4.12.0
+html5lib>=1.1
+
